@@ -1,0 +1,318 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>Camera Damage Detection</title>
+    <style>
+        body { 
+            font-family: Arial, sans-serif; 
+            margin: 20px; 
+            background: #f5f5f5;
+        }
+        .container {
+            max-width: 1200px;
+            margin: 0 auto;
+            background: white;
+            padding: 20px;
+            border-radius: 10px;
+        }
+        .video-container {
+            position: relative;
+            width: 100%;
+            max-width: 800px;
+            margin: 0 auto;
+        }
+        #video {
+            width: 100%;
+            border: 2px solid #ddd;
+            border-radius: 8px;
+            background: #000;
+        }
+        #overlay {
+            position: absolute;
+            top: 0;
+            left: 0;
+            width: 100%;
+            height: 100%;
+            pointer-events: none;
+        }
+        .controls {
+            display: flex;
+            gap: 10px;
+            margin: 20px 0;
+            justify-content: center;
+            flex-wrap: wrap;
+        }
+        button {
+            background: #007cba;
+            color: white;
+            padding: 10px 20px;
+            border: none;
+            border-radius: 5px;
+            cursor: pointer;
+            font-size: 14px;
+            min-width: 100px;
+        }
+        button:hover {
+            background: #005a87;
+        }
+        button:disabled {
+            background: #ccc;
+            cursor: not-allowed;
+        }
+        #autoBtn.auto-on {
+            background: #4caf50;
+        }
+        .status-info {
+            display: flex;
+            gap: 15px;
+            margin: 15px 0;
+            justify-content: center;
+            flex-wrap: wrap;
+        }
+        .status-item {
+            padding: 8px 16px;
+            background: #e3f2fd;
+            border-radius: 20px;
+            font-size: 14px;
+        }
+        .damage-detected {
+            background: #ffebee;
+            color: #d32f2f;
+            font-weight: bold;
+        }
+        .no-damage {
+            background: #e8f5e8;
+            color: #2e7d32;
+        }
+        #jsonResult {
+            background: #f8f9fa;
+            border: 1px solid #ddd;
+            border-radius: 5px;
+            padding: 15px;
+            max-height: 400px;
+            overflow-y: auto;
+            font-family: monospace;
+            font-size: 12px;
+            white-space: pre-wrap;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h1>Camera Damage Detection</h1>
+        
+        <div class="video-container">
+            <video id="video" autoplay playsinline></video>
+            <canvas id="overlay"></canvas>
+        </div>
+        
+        <div class="controls">
+            <button id="startBtn" onclick="startCamera()">Start Camera</button>
+            <button id="stopBtn" onclick="stopCamera()" disabled>Stop Camera</button>
+            <button id="captureBtn" onclick="captureAndDetect()" disabled>Capture</button>
+            <button id="autoBtn" onclick="toggleAutoMode()">Auto Mode</button>
+        </div>
+
+        <div class="status-info">
+            <div id="status" class="status-item">Status: Ready</div>
+            <div id="damageStatus" class="status-item no-damage">Damage: No</div>
+            <div id="boxCount" class="status-item">Boxes: 0</div>
+            <div id="processingTime" class="status-item">Time: 0ms</div>
+        </div>
+
+        <div>
+            <h3>JSON Response:</h3>
+            <div id="jsonResult">{
+  "status": "Capture an image to see results"
+}</div>
+        </div>
+    </div>
+
+    <script>
+        let videoStream = null;
+        let autoMode = false;
+        let autoInterval = null;
+        let isProcessing = false;
+        const video = document.getElementById('video');
+        const overlay = document.getElementById('overlay');
+        const overlayCtx = overlay.getContext('2d');
+
+        async function startCamera() {
+            try {
+                updateStatus('Starting camera...');
+                videoStream = await navigator.mediaDevices.getUserMedia({ 
+                    video: { 
+                        width: { ideal: 640 },
+                        height: { ideal: 480 },
+                        facingMode: 'environment'
+                    } 
+                });
+                
+                video.srcObject = videoStream;
+                
+                video.addEventListener('loadedmetadata', function() {
+                    overlay.width = video.videoWidth;
+                    overlay.height = video.videoHeight;
+                    updateStatus('Camera active');
+                });
+                
+                document.getElementById('startBtn').disabled = true;
+                document.getElementById('stopBtn').disabled = false;
+                document.getElementById('captureBtn').disabled = false;
+                
+            } catch (error) {
+                updateStatus(`Camera error: ${error.message}`);
+            }
+        }
+
+        function stopCamera() {
+            if (videoStream) {
+                videoStream.getTracks().forEach(track => track.stop());
+                videoStream = null;
+                video.srcObject = null;
+                document.getElementById('startBtn').disabled = false;
+                document.getElementById('stopBtn').disabled = true;
+                document.getElementById('captureBtn').disabled = true;
+                
+                if (autoMode) {
+                    toggleAutoMode();
+                }
+                
+                overlayCtx.clearRect(0, 0, overlay.width, overlay.height);
+                updateStatus('Camera stopped');
+                updateDamageStatus(false);
+                updateBoxCount(0);
+            }
+        }
+
+        function toggleAutoMode() {
+            autoMode = !autoMode;
+            const autoBtn = document.getElementById('autoBtn');
+            
+            if (autoMode) {
+                autoBtn.textContent = 'Auto: ON';
+                autoBtn.classList.add('auto-on');
+                autoInterval = setInterval(captureAndDetect, 500);
+                updateStatus('Auto mode: ON');
+            } else {
+                autoBtn.textContent = 'Auto Mode';
+                autoBtn.classList.remove('auto-on');
+                clearInterval(autoInterval);
+                updateStatus('Auto mode: OFF');
+            }
+        }
+
+        function drawBoxes(boxes) {
+            overlayCtx.clearRect(0, 0, overlay.width, overlay.height);
+            
+            if (!boxes || boxes.length === 0) return;
+            
+            boxes.forEach((box, index) => {
+                const [x1, y1, x2, y2] = box.bbox;
+                const confidence = box.confidence;
+                const labelType = box.label_name;
+                
+                let color, labelText;
+                if (labelType === 'damage') {
+                    color = '#ff0000';
+                    labelText = `Damage: ${(confidence * 100).toFixed(1)}%`;
+                } else {
+                    color = '#2196f3';
+                    labelText = `Package: ${(confidence * 100).toFixed(1)}%`;
+                }
+                
+                overlayCtx.strokeStyle = color;
+                overlayCtx.lineWidth = 2;
+                overlayCtx.strokeRect(x1, y1, x2 - x1, y2 - y1);
+                
+                overlayCtx.fillStyle = color;
+                overlayCtx.font = '12px Arial';
+                const textWidth = overlayCtx.measureText(labelText).width;
+                overlayCtx.fillRect(x1, y1 - 16, textWidth + 8, 16);
+                
+                overlayCtx.fillStyle = 'white';
+                overlayCtx.fillText(labelText, x1 + 4, y1 - 4);
+            });
+        }
+
+        async function captureAndDetect() {
+            if (!videoStream || isProcessing) return;
+
+            isProcessing = true;
+            const startTime = performance.now();
+
+            try {
+                const canvas = document.createElement('canvas');
+                canvas.width = video.videoWidth;
+                canvas.height = video.videoHeight;
+                const ctx = canvas.getContext('2d');
+                ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
+
+                const blob = await new Promise(resolve => canvas.toBlob(resolve, 'image/jpeg', 0.8));
+                
+                const formData = new FormData();
+                formData.append('file', blob, 'frame.jpg');
+
+                updateStatus('Analyzing...');
+
+                const response = await fetch('/predict', {
+                    method: 'POST',
+                    body: formData
+                });
+
+                if (!response.ok) {
+                    throw new Error(`HTTP error: ${response.status}`);
+                }
+
+                const data = await response.json();
+                const processingTime = Math.round(performance.now() - startTime);
+
+                const allBoxes = data.damage_boxes.concat(data.package_boxes);
+                drawBoxes(allBoxes);
+                
+                updateResults(data, processingTime);
+                updateDamageStatus(data.damaged);
+                updateBoxCount(allBoxes.length);
+                updateProcessingTime(processingTime);
+                
+                updateStatus('Analysis complete');
+
+            } catch (error) {
+                updateStatus(`Error: ${error.message}`);
+            } finally {
+                isProcessing = false;
+            }
+        }
+
+        function updateResults(data, processingTime) {
+            const jsonResult = document.getElementById('jsonResult');
+            jsonResult.textContent = JSON.stringify(data, null, 2);
+        }
+
+        function updateStatus(message) {
+            document.getElementById('status').textContent = `Status: ${message}`;
+        }
+
+        function updateDamageStatus(hasDamage) {
+            const damageElement = document.getElementById('damageStatus');
+            if (hasDamage) {
+                damageElement.textContent = 'Damage: YES';
+                damageElement.className = 'status-item damage-detected';
+            } else {
+                damageElement.textContent = 'Damage: No';
+                damageElement.className = 'status-item no-damage';
+            }
+        }
+
+        function updateBoxCount(count) {
+            document.getElementById('boxCount').textContent = `Boxes: ${count}`;
+        }
+
+        function updateProcessingTime(time) {
+            document.getElementById('processingTime').textContent = `Time: ${time}ms`;
+        }
+
+        window.addEventListener('beforeunload', stopCamera);
+    </script>
+</body>
+</html>
